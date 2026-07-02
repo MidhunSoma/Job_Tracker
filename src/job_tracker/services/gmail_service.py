@@ -55,6 +55,12 @@ class GmailService:
             redirect_uri=settings.gmail.redirect_uri
         )
         auth_url, _ = flow.authorization_url(prompt="consent", access_type="offline")
+        
+        # Save code_verifier to local file to complete PKCE check in callback
+        verifier_path = self.token_path.parent / "code_verifier.txt"
+        with open(verifier_path, "w", encoding="utf-8") as f:
+            f.write(flow.code_verifier)
+            
         return auth_url
 
     def save_token(self, code: str) -> None:
@@ -66,7 +72,22 @@ class GmailService:
             scopes=SCOPES,
             redirect_uri=settings.gmail.redirect_uri
         )
-        flow.fetch_token(code=code)
+        
+        # Load and set code_verifier for PKCE validation
+        verifier_path = self.token_path.parent / "code_verifier.txt"
+        code_verifier = None
+        if verifier_path.exists():
+            with open(verifier_path, "r", encoding="utf-8") as f:
+                code_verifier = f.read().strip()
+                
+        flow.fetch_token(code=code, code_verifier=code_verifier)
+        
+        # Clean up code_verifier file
+        if verifier_path.exists():
+            try:
+                verifier_path.unlink()
+            except Exception:
+                pass
         
         credentials = flow.credentials
         with open(self.token_path, "w", encoding="utf-8") as f:
