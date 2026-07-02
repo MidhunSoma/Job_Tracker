@@ -1,10 +1,22 @@
-# Python-generated files
-__pycache__/
-*.py[oc]
-build/
-dist/
-wheels/
-*.egg-info
+# Environment
+.venv/
+.env
 
-# Virtual environments
-.venv
+# Python
+__pycache__/
+*.pyc
+
+# Runtime files
+logs/
+exports/
+data/
+
+# OAuth credentials
+token.json
+client_secret.json
+
+# SQLite
+*.db
+
+# Excel exports
+*.xlsx
