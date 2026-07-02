@@ -12,7 +12,7 @@ class LLMService:
     """Service wrapping LangChain LLM endpoints for structured extraction and normalization."""
 
     def __init__(self) -> None:
-        self.provider = settings.llm.provider.lower()
+        self.provider = settings.llm.provider.lower().strip(" =")
         self.model_name = settings.llm.model
         self.temperature = 0.0  # Set temperature to 0 for highly consistent parsing
 
@@ -74,31 +74,101 @@ class LLMService:
         )
         
         try:
+            # 1. Print structured output schema
+            schema_json = json.dumps(AIJobEmailExtraction.model_json_schema(), indent=2)
+            logger.info(f"--- STRUCTURED OUTPUT SCHEMA ---\n{schema_json}\n--------------------------------")
+
+            # 2. Print exact prompt sent to Gemini
+            formatted_prompt = extract_prompt_v1.format(
+                subject=subject,
+                sender=sender,
+                date=date_str,
+                body=body[:8000]
+            )
+            logger.info(f"--- PROMPT SENT TO LLM ---\n{formatted_prompt}\n--------------------------")
+
+            # 3. Validate Gemini model name if provider is gemini
+            if self.provider == "gemini":
+                valid_gemini_models = [
+                    "gemini-1.5-flash", "gemini-1.5-pro", 
+                    "gemini-2.0-flash-exp", "gemini-2.0-flash", "gemini-2.0-pro-exp",
+                    "gemini-1.0-pro"
+                ]
+                if self.model_name not in valid_gemini_models:
+                    logger.warning(
+                        f"LLM__MODEL '{self.model_name}' is not in the list of standard Gemini models "
+                        f"({valid_gemini_models}). This might cause API errors or lack of structured output support."
+                    )
+
             llm = self._get_llm()
-            # Constrain LLM using structured output and include the raw message object
-            structured_llm = llm.with_structured_output(AIJobEmailExtraction, include_raw=True)
-            chain = extract_prompt_v1 | structured_llm
             
-            # Executing invocation
-            response = chain.invoke({
-                "subject": subject,
-                "sender": sender,
-                "date": date_str,
-                "body": body[:8000]  # Truncate body if excessive to fit standard context
-            })
+            parsed = None
+            raw_message = None
             
-            parsed = response.get("parsed")
-            raw_message = response.get("raw")
-            
+            # Try structured output using standard method
+            try:
+                logger.info("Attempting extraction using with_structured_output()...")
+                structured_llm = llm.with_structured_output(AIJobEmailExtraction, include_raw=True)
+                chain = extract_prompt_v1 | structured_llm
+                
+                response = chain.invoke({
+                    "subject": subject,
+                    "sender": sender,
+                    "date": date_str,
+                    "body": body[:8000]
+                })
+                parsed = response.get("parsed")
+                raw_message = response.get("raw")
+                
+                if raw_message:
+                    raw_content = getattr(raw_message, "content", "")
+                    tool_calls = raw_message.additional_kwargs.get("tool_calls", [])
+                    logger.info(
+                        f"--- RAW LLM RESPONSE (with_structured_output) ---\n"
+                        f"Content: {raw_content}\n"
+                        f"Tool Calls: {tool_calls}\n"
+                        f"-------------------------------------------------"
+                    )
+            except Exception as structured_err:
+                logger.error(
+                    f"with_structured_output() failed or is incompatible with {self.model_name}: {str(structured_err)}", 
+                    exc_info=True
+                )
+                logger.info("Switching to manual JSON generation and parsing fallback...")
+                
+                # Switch to raw model invocation and manual parsing
+                raw_chain = extract_prompt_v1 | llm
+                raw_message = raw_chain.invoke({
+                    "subject": subject,
+                    "sender": sender,
+                    "date": date_str,
+                    "body": body[:8000]
+                })
+                
+                raw_content = getattr(raw_message, "content", "")
+                logger.info(f"--- RAW LLM RESPONSE (fallback) ---\n{raw_content}\n----------------------------------")
+                
+                import re
+                content_clean = raw_content.strip()
+                if content_clean.startswith("```"):
+                    match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", content_clean)
+                    if match:
+                        content_clean = match.group(1)
+                
+                try:
+                    parsed_dict = json.loads(content_clean)
+                    parsed = AIJobEmailExtraction(**parsed_dict)
+                    logger.info("Successfully parsed raw response manually into AIJobEmailExtraction.")
+                except Exception as parse_err:
+                    logger.error(f"Manual JSON parsing failed: {parse_err}", exc_info=True)
+                    raise parse_err
+
             # Telemetry metadata
             token_usage = {}
             raw_json = "{}"
             
             if raw_message:
-                # Extract token usage metadata if available
                 token_usage = raw_message.response_metadata.get("token_usage", {})
-                
-                # Retrieve raw string JSON response
                 if hasattr(raw_message, "content") and raw_message.content:
                     raw_json = raw_message.content
                 elif "tool_calls" in raw_message.additional_kwargs:
@@ -106,7 +176,6 @@ class LLMService:
                     if tool_calls and len(tool_calls) > 0:
                         raw_json = json.dumps(tool_calls[0].get("function", {}).get("arguments", "{}"))
                 else:
-                    # Fallback serialization
                     raw_json = json.dumps(raw_message.additional_kwargs)
             
             telemetry = {
@@ -121,7 +190,6 @@ class LLMService:
             
         except Exception as e:
             logger.exception("LLM extraction call failed.", extra={"action": "LLM_EXTRACT_FAILURE"})
-            # Return empty telemetry with failure indicators
             return None, {
                 "raw_llm_json": "{}",
                 "prompt_version": "extract_prompt_v1",

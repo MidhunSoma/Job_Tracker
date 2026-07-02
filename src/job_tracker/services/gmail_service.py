@@ -248,7 +248,8 @@ class GmailService:
                 try:
                     received_at = email.utils.parsedate_to_datetime(date_str)
                     if received_at.tzinfo:
-                        received_at = received_at.astimezone(timedelta(0)).replace(tzinfo=None)
+                        from datetime import timezone
+                        received_at = received_at.astimezone(timezone.utc).replace(tzinfo=None)
                 except Exception:
                     logger.exception(f"Failed to parse date header: {date_str}. Defaulting to UTC now.")
             
